@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ørsted's Compass — Upside Down Learning</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --parchment:#F4ECD8; --brown:#3D2817; --tan:#8B6F47;
+    --stone:#3F3226; --rule:#C9B693; --paper:#FBF6EA; --red:#C4553B; --copper:#B87333;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--parchment);color:var(--brown);
+       font-family:'Courier Prime','Courier New',monospace;font-size:16px;line-height:1.5;
+       -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:10px 14px 12px}
+
+  header{border-bottom:2px solid var(--brown);padding-bottom:6px;margin-bottom:10px}
+  h1{font-size:1.12rem;font-weight:700;letter-spacing:.06em;margin:0}
+  .sub{color:var(--stone);font-size:.94rem;margin-top:4px;letter-spacing:.02em}
+
+  .stage{display:grid;grid-template-columns:minmax(0,1fr) minmax(210px,265px);gap:12px;align-items:start}
+
+  .board{background:var(--paper);border:2px solid var(--brown)}
+  canvas{display:block;width:100%;height:auto;touch-action:none;cursor:grab}
+  canvas.dragging{cursor:grabbing}
+  canvas:focus{outline:3px solid var(--tan);outline-offset:-3px}
+  .hint{background:var(--parchment);border-top:2px solid var(--brown);
+        padding:5px 10px;font-size:.72rem;color:var(--stone)}
+
+  .panel{display:flex;flex-direction:column;gap:8px}
+  .readout{border:2px solid var(--brown);background:var(--paper);padding:9px 12px}
+  .readout h2{font-size:.72rem;letter-spacing:.14em;margin:0 0 8px;color:var(--brown);font-weight:700}
+  .row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+       padding:3px 0;border-bottom:1px dotted var(--rule)}
+  .row:last-child{border-bottom:0}
+  .row .k{font-size:.76rem;color:var(--stone)}
+  .row .v{font-size:.95rem;font-weight:700;font-variant-numeric:tabular-nums}
+  .v.off{color:var(--red)}
+
+  .controls{display:flex;flex-direction:column;gap:6px}
+  button{font-family:inherit;font-size:.8rem;font-weight:700;
+         background:var(--tan);color:#FBF6EA;border:2px solid var(--brown);
+         padding:7px 11px;text-align:center;cursor:pointer;width:100%}
+  button:hover{background:var(--brown);color:var(--parchment)}
+  button.ghost{background:var(--paper);color:var(--brown);border-style:dashed;font-weight:400}
+  button:focus-visible{outline:3px solid var(--tan);outline-offset:2px}
+
+  footer{margin-top:10px;padding-top:6px;border-top:1px solid var(--rule);
+         font-size:.72rem;color:var(--stone)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>&Oslash;RSTED&rsquo;S COMPASS</h1>
+    <div class="sub">A wire runs north to south above the bench. Move the compass and close the switch.</div>
+  </header>
+
+  <div class="stage">
+    <div class="board">
+      <canvas id="c" width="1400" height="820" tabindex="0"
+              aria-label="A bench seen from above, with a battery, a wire running north to south, and a compass that can be moved."></canvas>
+      <div class="hint" id="hint">Drag the compass. Arrow keys work too.</div>
+    </div>
+
+    <div class="panel">
+      <div class="readout">
+        <h2>READINGS</h2>
+        <div class="row"><span class="k">Current</span><span class="v off" id="rCur">off</span></div>
+        <div class="row"><span class="k">Distance from wire</span><span class="v" id="rDist">0 cm</span></div>
+        <div class="row"><span class="k">Needle points</span><span class="v" id="rDefl">north</span></div>
+      </div>
+
+      <div class="controls">
+        <button id="bSwitch">Close the switch</button>
+        <button id="bFlip" class="ghost">Reverse the current</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>Seen from above. North is toward the top of the bench.</footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  var W = cv.width, H = cv.height;
+  var css = getComputedStyle(document.documentElement);
+  var C = { brown: css.getPropertyValue('--brown').trim(),
+            tan:   css.getPropertyValue('--tan').trim(),
+            rule:  css.getPropertyValue('--rule').trim(),
+            red:   css.getPropertyValue('--red').trim(),
+            copper:css.getPropertyValue('--copper').trim(),
+            paper: css.getPropertyValue('--paper').trim() };
+
+  var WX = W*0.52;                 // the wire runs north to south at this position
+  var TOP = H*0.10, BOT = H*0.90;  // the length of wire over the bench
+  var on = false, dir = 1;         // dir 1 = current flowing north
+  var cx = W*0.68, cy = H*0.50;    // compass position
+  var CR = Math.min(W,H)*0.10;
+  var PX_PER_CM = (W*0.34)/30;     // about 30 cm of bench either side of the wire
+  var HGT = 6;                     // the wire sits about 6 cm above the bench
+
+  function distanceCm(){ return Math.abs(cx - WX)/PX_PER_CM; }
+
+  function deflection(){           // degrees away from north, east positive
+    if (!on) return 0;
+    var d = distanceCm();
+    // the horizontal part of the wire's field, strongest directly under the wire
+    var strength = 34 * HGT / (d*d + HGT*HGT);
+    return Math.atan(strength)*180/Math.PI * dir;
+  }
+
+  function drawBench(){
+    ctx.save();
+    ctx.strokeStyle = C.rule; ctx.lineWidth = 2; ctx.setLineDash([6,8]);
+    for (var k=-3; k<=3; k++){
+      if (k===0) continue;
+      var x = WX + k*10*PX_PER_CM;
+      if (x < 30 || x > W-30) continue;
+      ctx.beginPath(); ctx.moveTo(x, TOP); ctx.lineTo(x, BOT); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = C.rule; ctx.font = '600 17px "Courier Prime", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(Math.abs(k*10)+' cm', x, BOT+30);
+      ctx.setLineDash([6,8]);
+    }
+    ctx.restore();
+  }
+
+  function drawPile(){
+    // a voltaic pile: stacked discs, drawn at the foot of the bench
+    var px = W*0.115, py = H*0.74, w = 130, disc = 17, n = 8;
+    ctx.save();
+    for (var i=0;i<n;i++){
+      var y = py - i*disc;
+      ctx.fillStyle = (i%2===0) ? '#9A9A93' : C.copper;
+      ctx.fillRect(px - w/2, y, w, disc-2);
+      ctx.lineWidth = 2; ctx.strokeStyle = C.brown;
+      ctx.strokeRect(px - w/2, y, w, disc-2);
+    }
+    ctx.fillStyle = C.brown; ctx.font = '700 19px "Courier Prime", monospace';
+    ctx.textAlign='center';
+    ctx.fillText('voltaic pile', px, py + 46);
+    ctx.restore();
+    return { x: px, top: py - (n-1)*disc, bot: py + disc - 2 };
+  }
+
+  function drawCircuit(pile){
+    var wireCol = on ? C.copper : '#B9AC93';
+    ctx.save();
+    ctx.lineWidth = 8; ctx.lineJoin='round'; ctx.lineCap='round';
+    ctx.strokeStyle = wireCol;
+
+    // the wire over the bench, north to south
+    ctx.beginPath(); ctx.moveTo(WX, TOP); ctx.lineTo(WX, BOT); ctx.stroke();
+
+    // leads back to the pile
+    ctx.beginPath();
+    ctx.moveTo(WX, TOP); ctx.lineTo(pile.x, TOP); ctx.lineTo(pile.x, pile.top - 34);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(WX, BOT); ctx.lineTo(pile.x + 150, BOT); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(pile.x, pile.bot + 8); ctx.lineTo(pile.x, BOT); ctx.lineTo(pile.x + 150, BOT);
+    ctx.stroke();
+
+    // the switch, in the upper lead
+    var sx = (pile.x + WX)/2, sy = TOP;
+    ctx.strokeStyle = C.brown; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(sx-34, sy, 8, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(sx+34, sy, 8, 0, Math.PI*2); ctx.stroke();
+    ctx.lineWidth = 7; ctx.strokeStyle = on ? C.copper : C.brown;
+    ctx.beginPath();
+    ctx.moveTo(sx-34, sy);
+    if (on) ctx.lineTo(sx+34, sy); else ctx.lineTo(sx+18, sy-38);
+    ctx.stroke();
+    ctx.fillStyle = C.brown; ctx.font = '700 17px "Courier Prime", monospace';
+    ctx.textAlign='center';
+    ctx.fillText('switch', sx, sy - 52);
+
+    // current arrows along the wire
+    if (on){
+      ctx.fillStyle = C.brown;
+      for (var y = TOP + 70; y < BOT - 40; y += 96){
+        ctx.beginPath();
+        ctx.moveTo(WX, y - dir*17);
+        ctx.lineTo(WX - 11, y + dir*10);
+        ctx.lineTo(WX + 11, y + dir*10);
+        ctx.closePath(); ctx.fill();
+      }
+    }
+
+    ctx.fillStyle = C.brown; ctx.font = '700 19px "Courier Prime", monospace';
+    ctx.textAlign='left';
+    ctx.fillText('wire above the bench', WX + 18, TOP - 14);
+    ctx.restore();
+  }
+
+  function drawCompass(){
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, CR, 0, Math.PI*2);
+    ctx.fillStyle = C.paper; ctx.fill();
+    ctx.lineWidth = 5; ctx.strokeStyle = C.brown; ctx.stroke();
+
+    ctx.fillStyle = C.tan; ctx.font = '700 19px "Courier Prime", monospace';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('N', cx, cy-CR*0.78);
+    ctx.fillText('S', cx, cy+CR*0.78);
+    ctx.fillText('E', cx+CR*0.78, cy);
+    ctx.fillText('W', cx-CR*0.78, cy);
+
+    var th = (-90 + deflection())*Math.PI/180;
+    var L = CR*0.72, HW = CR*0.15;
+    var dx = Math.cos(th), dy = Math.sin(th);
+    var px = -dy, py = dx;
+    ctx.beginPath();
+    ctx.moveTo(cx+dx*L, cy+dy*L);
+    ctx.lineTo(cx+px*HW, cy+py*HW);
+    ctx.lineTo(cx-px*HW, cy-py*HW);
+    ctx.closePath(); ctx.fillStyle = C.red; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = C.brown; ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx-dx*L, cy-dy*L);
+    ctx.lineTo(cx+px*HW, cy+py*HW);
+    ctx.lineTo(cx-px*HW, cy-py*HW);
+    ctx.closePath(); ctx.fillStyle = C.paper; ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, HW*0.7, 0, Math.PI*2);
+    ctx.fillStyle = C.paper; ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function render(){
+    ctx.clearRect(0,0,W,H);
+    drawBench();
+    var pile = drawPile();
+    drawCircuit(pile);
+    drawCompass();
+
+    var cEl = document.getElementById('rCur');
+    cEl.textContent = on ? (dir>0 ? 'flowing north' : 'flowing south') : 'off';
+    cEl.className = on ? 'v' : 'v off';
+    document.getElementById('rDist').textContent = distanceCm().toFixed(0) + ' cm';
+    var d = deflection();
+    document.getElementById('rDefl').textContent =
+      (Math.abs(d) < 0.5) ? 'north'
+        : Math.abs(d).toFixed(0) + '\u00B0 ' + (d>0 ? 'east of north' : 'west of north');
+    document.getElementById('bSwitch').textContent = on ? 'Open the switch' : 'Close the switch';
+  }
+
+  var dragging = false;
+  function place(ev){
+    var rect = cv.getBoundingClientRect();
+    var k = Math.min(rect.width/W, rect.height/H);
+    var ox = (rect.width - W*k)/2, oy = (rect.height - H*k)/2;
+    cx = (ev.clientX - rect.left - ox)/k;
+    cy = (ev.clientY - rect.top  - oy)/k;
+    cx = Math.max(CR+14, Math.min(W-CR-14, cx));
+    cy = Math.max(TOP+CR+10, Math.min(BOT-CR-10, cy));
+  }
+  cv.addEventListener('pointerdown', function(ev){
+    dragging = true; cv.classList.add('dragging');
+    cv.setPointerCapture(ev.pointerId); place(ev); render();
+  });
+  cv.addEventListener('pointermove', function(ev){ if(dragging){ place(ev); render(); } });
+  cv.addEventListener('pointerup', function(){ dragging=false; cv.classList.remove('dragging'); });
+  cv.addEventListener('keydown', function(ev){
+    var step = ev.shiftKey ? 3 : 12;
+    if (ev.key==='ArrowLeft')       cx = Math.max(CR+14, cx-step);
+    else if (ev.key==='ArrowRight') cx = Math.min(W-CR-14, cx+step);
+    else if (ev.key==='ArrowUp')    cy = Math.max(TOP+CR+10, cy-step);
+    else if (ev.key==='ArrowDown')  cy = Math.min(BOT-CR-10, cy+step);
+    else return;
+    ev.preventDefault(); render();
+  });
+
+  document.getElementById('bSwitch').addEventListener('click', function(){ on = !on; render(); });
+  document.getElementById('bFlip').addEventListener('click', function(){ dir = -dir; render(); });
+
+  render();
+})();
+</script>
+</body>
+</html>
